@@ -1,0 +1,8 @@
+For my experiment, R0 = 1 occured at the beta value of 0.15. As seen in both models, the graph produced at beta = 0.15 is a 
+straight line, and in a more complex model which allows for births and deaths, this would result in an endemic disease. All 
+beta values above that took a parabolic arc indicative of an epidemic, with I increasing with time after the start. All beta 
+values below 0.15 decreased sharply after the start, showing that people recovered faster than they were infected. This aligns
+perfectly with threshold theorem.
+
+The RK4 method performs better at course timesteps than Euler's method, with Euler's producing a strange upward spike in 
+infections at the end of the time span.
