@@ -1,0 +1,13 @@
+1. 
+Case R0 < 1  (i.e. βN0 < γ)
+I' = βIS - γI < 0, so the number of infected decreases monotonically towards 0.
+S' = -βIS + γI > 0
+I" > 0 Making this point unstable
+
+Case R0 > 1  (i.e. βN0 > γ)
+I' = βIS - γI > 0, so the number of infected increases towards an endemic holding point N0 - γ/β
+S' = -βIS + γI < 0
+I" < 0 making this a stable point.
+
+2. 
+S' = 
