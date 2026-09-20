@@ -10,4 +10,17 @@ S' = -βIS + γI < 0
 I" < 0 making this a stable point.
 
 2. 
-S' = 
+The Eigenvalue Criterion theorem states that the state y is asymptotically stable if and only if every eigenvalue of the 
+jacobian of the system has a negative real part.
+This is more easily verified by utilizing the Routh–Hurwitz conditions that state that the eigenvalues of a matrix 
+A have negative real part if and only if: 
+1. (2×2) tr(A)<0 and det⁡(A)>0;
+2. (3×3) tr(A)<0, det(A)<0, and tr(A)a2−det(A)<0, where a2 is the sum of the 2×2 principal minors of A
+
+J = [-βI' - μ    -βS'     0]
+    [βI'        βS'-γ-μ   0]
+    [0             γ     -μ]
+det(J) = μ(γ + μ)(R0 - 1)
+tr(J) = -μR0
+a2 = -μβS' +γμ +u^2 + βI'γ +βS'u -βI'γ -uγ = u^2
+
