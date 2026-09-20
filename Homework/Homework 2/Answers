@@ -22,5 +22,12 @@ J = [-βI' - μ    -βS'     0]
     [0             γ     -μ]
 det(J) = μ(γ + μ)(R0 - 1)
 tr(J) = -μR0
-a2 = -μβS' +γμ +u^2 + βI'γ +βS'u -βI'γ -uγ = u^2
+a2 = -μβS' +γμ +μ^2 + βI'γ +βS'μ -βI'γ -μγ = μ^2
+
+
+tr(J) = -μR0 < 0 (death rate and R0 are always positive values)
+det(J) = μ(γ + μ)(R0 - 1) < 0  (if R0 <1)
+
+As discussed in class, this is a faster way to analyze whether or not the point y is anymptotically stable without having to
+calculate the roots of the quadratic equation.
 
