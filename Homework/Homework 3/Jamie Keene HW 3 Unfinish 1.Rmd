@@ -1,0 +1,982 @@
+---
+title: "The SEIR Model, $R_0$, and the Next-Generation Matrix: Walkthrough and Homework 2"
+subtitle: "MATH 4320 --- Mathematical Epidemiology and Network Dynamics, Week 3"
+author: "YOUR NAME HERE"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: cosmo
+    mathjax: "https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 7.5, fig.height = 4.8)
+library(deSolve)
+library(ggplot2)
+theme_set(theme_minimal(base_size = 14))
+```
+
+## How to use this document
+
+This document has two parts.
+
+* **Part A (Sections 1--6)** walks through the Week 3 theory with working code, in
+  the same order as the lecture. Every chunk runs as written. Read the text,
+  run the chunk, and check that the output says what the text claims.
+* **Part B (Homework 2)** asks seven questions; the last one is optional. Each
+  has a **math** part, which you answer in this document using LaTeX between
+  dollar signs (as the theory sections below do), and a **code** part, which
+  you answer by extending the code from Part A in the empty chunk provided.
+
+To submit: put your name in the `author:` field at the top, knit to HTML, and
+push both the `.Rmd` and the `.html` to your course repository.
+
+Two conventions are used throughout, matching the notes. Everything is in
+**proportions** ($S+E+I+R=1$), and time is measured in **days**, so every rate
+is "per day."
+
+------------------------------------------------------------------------
+
+# Part A: Walkthrough
+
+## 1. The model
+
+Week 1 assumed that an infected host is infectious immediately. The SEIR model
+relaxes that: a newly infected host first enters an **exposed** class $E$
+(infected, not yet infectious) and moves on to $I$ at rate $\sigma$, so that
+$1/\sigma$ is the mean latent period. With birth and death rate $\mu$:
+
+$$
+\begin{aligned}
+S' &= \mu - \beta I S - \mu S, \\
+E' &= \beta I S - (\sigma+\mu)E, \\
+I' &= \sigma E - (\gamma+\mu)I, \\
+R' &= \gamma I - \mu R.
+\end{aligned}
+$$
+
+In code, the model is a function that takes the current state and returns the
+four derivatives. This is the form `deSolve` expects.
+
+```{r model}
+seir <- function(t, y, parms) {
+  with(as.list(c(y, parms)), {
+    dS <- mu - beta * I * S - mu * S
+    dE <- beta * I * S - (sigma + mu) * E
+    dI <- sigma * E - (gamma + mu) * I
+    dR <- gamma * I - mu * R
+    list(c(dS, dE, dI, dR))
+  })
+}
+```
+
+Our running example is a flu-like infection: a latent period of 3 days, an
+infectious period of 5 days, and a life expectancy of 70 years.
+
+```{r parameters}
+parms <- c(beta  = 0.6,            # transmission coefficient, per day
+           sigma = 1 / 3,          # 1 / latent period
+           gamma = 1 / 5,          # 1 / infectious period
+           mu    = 1 / (70 * 365)) # 1 / life expectancy
+```
+
+A small helper runs the solver and returns a data frame. The tight tolerances
+matter later, when $I$ becomes very small.
+
+```{r solver}
+run_seir <- function(parms, y0, times) {
+  as.data.frame(ode(y = y0, times = times, func = seir, parms = parms,
+                    rtol = 1e-8, atol = 1e-12))
+}
+
+y0    <- c(S = 1 - 1e-6, E = 0, I = 1e-6, R = 0)   # one infectious host per million
+times <- seq(0, 200, by = 0.5)
+out   <- run_seir(parms, y0, times)
+head(out)
+```
+
+```{r first-plot}
+to_long <- function(out, vars = c("S", "E", "I", "R")) {
+  data.frame(time        = rep(out$time, length(vars)),
+             compartment = factor(rep(vars, each = nrow(out)), levels = vars),
+             fraction    = unlist(out[vars], use.names = FALSE))
+}
+
+ggplot(to_long(out), aes(time, fraction, colour = compartment)) +
+  geom_line(linewidth = 1) +
+  labs(x = "time (days)", y = "fraction of the population",
+       title = "One SEIR epidemic")
+```
+
+The $E$ curve rises first and the $I$ curve follows it: every infectious host
+was exposed a few days earlier.
+
+------------------------------------------------------------------------
+
+## 2. What the latent period changes, and what it does not
+
+The notes derive
+
+$$
+R_0 = \beta\cdot\frac{\sigma}{\sigma+\mu}\cdot\frac{1}{\gamma+\mu}
+    = \frac{\beta\sigma}{(\sigma+\mu)(\gamma+\mu)} .
+$$
+
+The latent period enters only through $\sigma/(\sigma+\mu)$, the probability
+of surviving latency, which is essentially $1$ when the latent period is days
+and a lifetime is decades.
+
+```{r R0-formula}
+R0_formula <- function(parms) {
+  with(as.list(parms), beta * sigma / ((sigma + mu) * (gamma + mu)))
+}
+R0_formula(parms)
+```
+
+So changing the latent period should leave $R_0$ almost untouched. Here are
+three latent periods, everything else fixed.
+
+```{r latent-sweep}
+latent_days <- c(0.5, 3, 8)
+
+runs <- lapply(latent_days, function(L) {
+  p <- parms
+  p["sigma"] <- 1 / L
+  d <- run_seir(p, y0, seq(0, 300, by = 0.5))
+  d$latent <- paste(L, "days")
+  d$R0 <- R0_formula(p)
+  d
+})
+runs <- do.call(rbind, runs)
+runs$latent <- factor(runs$latent, levels = paste(latent_days, "days"))
+
+ggplot(runs, aes(time, I, colour = latent)) +
+  geom_line(linewidth = 1) +
+  labs(x = "time (days)", y = "I(t)", colour = "latent period",
+       title = "Same R0, different clocks")
+```
+
+```{r latent-table}
+do.call(rbind, lapply(split(runs, runs$latent), function(d) {
+  data.frame(latent_period = d$latent[1],
+             R0            = round(d$R0[1], 4),
+             peak_day      = d$time[which.max(d$I)],
+             peak_I        = round(max(d$I), 4),
+             lowest_S      = round(min(d$S), 3))
+}))
+```
+
+$R_0$ differs by less than one part in a thousand across the three runs, and
+the lowest value $S$ reaches, a measure of how much of the population the
+epidemic infects, is close in all three. (The small differences come from
+births, which keep adding susceptibles while the slower epidemics run.
+Question 2 of the homework removes births and makes the statement exact.) What
+changes is *when* the epidemic happens, and how tall its peak is.
+
+### How fast does it grow?
+
+Early in an epidemic $S\approx 1$, and the infected compartments obey the
+linearization at the disease-free equilibrium. The notes show that, apart
+from the eigenvalue $\Lambda_1=-\mu$, the eigenvalues $\Lambda$ of $J(P_0)$ are
+the roots of
+
+$$
+\Lambda^2+(\sigma+\gamma+2\mu)\,\Lambda+(\sigma+\mu)(\gamma+\mu)(1-R_0)=0 .
+$$
+
+When $R_0>1$ its roots have opposite signs. The positive root, call it $r$, is
+the **early exponential growth rate**: $I(t)$ grows like $e^{rt}$.
+
+```{r growth-rate}
+growth_rate <- function(parms) {
+  with(as.list(parms), {
+    b  <- sigma + gamma + 2 * mu
+    c0 <- (sigma + mu) * (gamma + mu) * (1 - R0_formula(parms))
+    (-b + sqrt(b^2 - 4 * c0)) / 2
+  })
+}
+r_predicted <- growth_rate(parms)
+r_predicted
+```
+
+That is a prediction from a matrix. We can test it against the simulation by
+fitting a straight line to $\log I(t)$ over the early part of the epidemic.
+
+```{r growth-fit}
+t_peak <- out$time[which.max(out$I)]
+early  <- subset(out, time < t_peak & I > 1e-5 & I < 1e-3)
+fit    <- lm(log(I) ~ time, data = early)
+
+c(predicted = r_predicted, fitted = unname(coef(fit)["time"]))
+```
+
+```{r growth-plot}
+ggplot(out, aes(time, I)) +
+  geom_line(linewidth = 1) +
+  geom_abline(intercept = coef(fit)[1] / log(10), slope = r_predicted / log(10),
+              linetype = "dashed", colour = "firebrick") +
+  scale_y_log10() +
+  labs(x = "time (days)", y = "I(t), log scale",
+       title = "Early growth is exponential, at the rate the Jacobian predicts",
+       subtitle = "dashed: a line with slope r")
+```
+
+For comparison, the SIR model with the same $\beta$ and $\gamma$ grows at rate
+$\beta-(\gamma+\mu)$:
+
+```{r growth-sir}
+c(SEIR = r_predicted,
+  SIR  = unname(parms["beta"] - (parms["gamma"] + parms["mu"])))
+```
+
+The two models have almost the same $R_0$, but the SEIR epidemic grows at less
+than half the speed. **$R_0$ counts infections per generation; it says nothing
+about how long a generation takes.** Question 6 of the homework turns this
+around.
+
+------------------------------------------------------------------------
+
+## 3. Equilibria
+
+Setting the right-hand sides to zero gives the disease-free equilibrium
+$P_0=(1,0,0)$ and, when $R_0>1$, the endemic equilibrium
+
+$$
+S^*=\frac{1}{R_0},\qquad I^*=\frac{\mu}{\beta}(R_0-1),\qquad E^*=\frac{\gamma+\mu}{\sigma}\,I^* .
+$$
+
+```{r equilibrium}
+endemic_eq <- function(parms) {
+  with(as.list(parms), {
+    R0     <- R0_formula(parms)
+    S_star <- 1 / R0
+    I_star <- mu / beta * (R0 - 1)
+    E_star <- (gamma + mu) / sigma * I_star
+    c(S = S_star, E = E_star, I = I_star, R = 1 - S_star - E_star - I_star)
+  })
+}
+P_star <- endemic_eq(parms)
+P_star
+```
+
+A formula for an equilibrium is easy to check: plug it into the model and the
+derivatives should all be zero.
+
+```{r equilibrium-check}
+seir(0, P_star, parms)[[1]]
+```
+
+Notice how small $I^*$ is. At the endemic equilibrium about a third of the
+population is susceptible, but only about one person in ten thousand is
+infectious at any moment.
+
+------------------------------------------------------------------------
+
+## 4. The next-generation matrix
+
+The general recipe: take the infected compartments only, $x=(E,I)$, and write
+$x'=\mathcal{F}-\mathcal{V}$, where $\mathcal{F}$ holds the **new infections**
+and $\mathcal{V}$ holds every other transfer. For SEIR,
+
+$$
+\mathcal{F}=\begin{pmatrix}\beta I S\\ 0\end{pmatrix},\qquad
+\mathcal{V}=\begin{pmatrix}(\sigma+\mu)E\\ (\gamma+\mu)I-\sigma E\end{pmatrix}.
+$$
+
+Differentiating with respect to $(E,I)$ at the disease-free equilibrium
+$(S,E,I)=(1,0,0)$ gives
+
+$$
+F=\begin{pmatrix}0&\beta\\0&0\end{pmatrix},\qquad
+V=\begin{pmatrix}\sigma+\mu&0\\-\sigma&\gamma+\mu\end{pmatrix},
+$$
+
+and then $K=FV^{-1}$ and $R_0=\rho(K)$, the largest eigenvalue of $K$ in
+absolute value.
+
+```{r ngm}
+ngm <- function(parms) {
+  with(as.list(parms), {
+    nm   <- list(c("E", "I"), c("E", "I"))
+    Fmat <- matrix(c(0, beta,
+                     0, 0), nrow = 2, byrow = TRUE, dimnames = nm)
+    Vmat <- matrix(c(sigma + mu, 0,
+                     -sigma,     gamma + mu), nrow = 2, byrow = TRUE, dimnames = nm)
+    Vinv <- solve(Vmat)          # matrix inverse
+    K    <- Fmat %*% Vinv        # matrix product
+    list(F = Fmat, V = Vmat, Vinv = Vinv, K = K,
+         R0 = max(Mod(eigen(K)$values)))
+  })
+}
+res <- ngm(parms)
+res$F
+res$V
+```
+
+$V^{-1}$ has a meaning of its own. Entry $(i,j)$ is the expected time that a
+host starting in compartment $j$ (column) spends in compartment $i$ (row).
+
+```{r ngm-vinv}
+res$Vinv
+```
+
+Read the first column: a host entering $E$ spends about 3 days there and
+then, on average, about 5 days in $I$. Read the second column: a host placed
+directly in $I$ spends about 5 days there and never visits $E$.
+
+Multiplying by $F$ turns time spent into new infections produced:
+
+```{r ngm-K}
+res$K
+eigen(res$K)$values
+c(from_matrix = res$R0, from_formula = R0_formula(parms))
+```
+
+The matrix method and the formula agree. The bottom row of $K$ is zero because
+every new infection enters $E$; none enters $I$ directly.
+
+------------------------------------------------------------------------
+
+## 5. Local stability
+
+The Jacobian of the reduced system, in the order $(S,E,I)$, is
+
+$$
+J(S,E,I)=\begin{pmatrix}
+-\beta I-\mu & 0 & -\beta S\\
+\beta I & -(\sigma+\mu) & \beta S\\
+0 & \sigma & -(\gamma+\mu)
+\end{pmatrix}.
+$$
+
+```{r jacobian}
+jacobian <- function(state, parms) {
+  with(as.list(c(state, parms)), {
+    matrix(c(-beta * I - mu,  0,              -beta * S,
+              beta * I,       -(sigma + mu),   beta * S,
+              0,               sigma,         -(gamma + mu)),
+           nrow = 3, byrow = TRUE)
+  })
+}
+P_0 <- c(S = 1, E = 0, I = 0)
+
+eigen(jacobian(P_0, parms))$values
+eigen(jacobian(P_star, parms))$values
+```
+
+At $P_0$ one eigenvalue is positive, so $P_0$ is unstable. That positive
+eigenvalue is exactly the growth rate $r$ from Section 2. At $P^*$ all three
+real parts are negative, so $P^*$ is asymptotically stable, as the theorem in
+the notes says it must be when $R_0>1$.
+
+The notes prove the $P^*$ case through the Routh--Hurwitz conditions:
+$\operatorname{tr}J<0$, $\det J<0$, and $\operatorname{tr}J\cdot a_2-\det J<0$,
+where $a_2$ is the sum of the three $2\times 2$ principal minors.
+
+```{r routh-hurwitz}
+J  <- jacobian(P_star, parms)
+tr <- sum(diag(J))
+a2 <- det(J[c(1, 2), c(1, 2)]) + det(J[c(1, 3), c(1, 3)]) + det(J[c(2, 3), c(2, 3)])
+c(trace = tr, a2 = a2, det = det(J), third_condition = tr * a2 - det(J))
+```
+
+One set of parameters is an example, not a proof. But we can at least watch
+the theorem hold across a whole range of $\beta$, passing through $R_0=1$.
+
+```{r stability-sweep}
+beta_grid <- seq(0.05, 1.2, length.out = 200)
+
+sweep <- do.call(rbind, lapply(beta_grid, function(b) {
+  p <- parms
+  p["beta"] <- b
+  R0 <- R0_formula(p)
+  at_P0    <- max(Re(eigen(jacobian(P_0, p))$values))
+  at_Pstar <- if (R0 > 1) max(Re(eigen(jacobian(endemic_eq(p), p))$values)) else NA
+  data.frame(R0 = R0,
+             equilibrium = c("P0 (disease-free)", "P* (endemic)"),
+             leading = c(at_P0, at_Pstar))
+}))
+sweep <- na.omit(sweep)
+
+ggplot(sweep, aes(R0, leading)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  geom_line(linewidth = 1, colour = "firebrick") +
+  facet_wrap(~ equilibrium, scales = "free_y") +
+  labs(x = expression(R[0]), y = "largest real part of the eigenvalues",
+       title = "Stability changes hands at R0 = 1")
+```
+
+In the left panel the curve crosses zero exactly at $R_0=1$: $P_0$ is stable
+below the threshold and unstable above it. In the right panel the curve stays
+below zero wherever $P^*$ exists. Look at the vertical scales, though. At $P^*$
+the leading real part is thousands of times smaller than at $P_0$. The endemic
+equilibrium is stable, but only weakly: the return to it is very slow.
+
+------------------------------------------------------------------------
+
+## 6. The slow approach to the endemic equilibrium
+
+To see that slow return, start near $P^*$ with twice the endemic level of
+infection, and run for 150 years.
+
+```{r long-run}
+y_near <- c(S = P_star[["S"]], E = 2 * P_star[["E"]], I = 2 * P_star[["I"]])
+y_near <- c(y_near, R = 1 - sum(y_near))
+
+long_run <- run_seir(parms, y_near, seq(0, 150 * 365, by = 5))
+
+ggplot(long_run, aes(time / 365, I)) +
+  geom_line(colour = "firebrick") +
+  geom_hline(yintercept = P_star[["I"]], linetype = "dashed") +
+  labs(x = "time (years)", y = "I(t)",
+       title = "Damped oscillations toward the endemic equilibrium",
+       subtitle = "dashed: I*")
+```
+
+The eigenvalues of $J(P^*)$ explain both features of this picture. A complex
+pair $a\pm ib$ produces oscillations with period $2\pi/b$ inside an envelope
+$e^{at}$. Keeling and Rohani give the approximation $T\approx 2\pi\sqrt{AG}$,
+with $A=1/(\mu(R_0-1))$ the mean age at infection and
+$G=\frac{1}{\gamma+\mu}+\frac{1}{\sigma+\mu}$ the generation time.
+
+```{r period}
+ev <- eigen(jacobian(P_star, parms))$values
+ev
+
+A <- 1 / (parms[["mu"]] * (R0_formula(parms) - 1))
+G <- 1 / (parms[["gamma"]] + parms[["mu"]]) + 1 / (parms[["sigma"]] + parms[["mu"]])
+
+# locate the peaks of the simulated I(t) and average the gaps between them
+peaks <- which(diff(sign(diff(long_run$I))) == -2) + 1
+
+c(period_from_eigenvalue  = 2 * pi / max(Im(ev)) / 365,
+  period_Keeling_Rohani   = 2 * pi * sqrt(A * G) / 365,
+  period_from_simulation  = mean(diff(long_run$time[peaks])) / 365,
+  damping_time            = 1 / abs(Re(ev[which.max(Im(ev))])) / 365)
+```
+
+All four numbers are in years. Compare the three independent routes to the
+period: the eigenvalues, the approximation, and simply measuring the
+simulation. The damping time is the time for the oscillation's amplitude to fall
+by a factor of $e$.
+
+Compare the two clocks in this model: an epidemic is over in a few months
+(Section 1), while the approach to endemic equilibrium takes generations.
+
+------------------------------------------------------------------------
+
+# Part B: Homework 2
+
+Answer every part in this document. For the math parts, write your derivation
+under **Your answer** using LaTeX, showing the steps and not only the result.
+For the code parts, use the empty chunk. Reuse the functions defined in Part A
+(`seir`, `run_seir`, `R0_formula`, `ngm`, `jacobian`, `endemic_eq`); copy and
+modify them when a question changes the model. Questions 1--6 are required;
+Question 7 is optional.
+
+## Before you start: the diseases behind these models
+
+Each model in this homework is a simplification that fits some real infections
+well. What decides the choice is the biology: whether infected people recover,
+whether recovery leaves them immune, and whether there is a delay between
+being infected and being able to infect others.
+
+| Model | Main assumption | Typical diseases |
+|:--|:--|:--|
+| SI | Infected people never recover. | HIV without treatment: infection is lifelong. |
+| SIS | Recovery gives no immunity, so recovered people are immediately susceptible again. | Gonorrhea and chlamydia: antibiotics cure the infection but leave no protection against catching it again. |
+| SIR, closed population | Recovery gives lifelong immunity, and the outbreak is short compared with a human lifetime. | A single outbreak in a closed group, such as the classic 1978 influenza outbreak in an English boarding school, where 512 of 763 boys fell ill in about two weeks. |
+| SIR with births and deaths | Lifelong immunity; births supply new susceptibles, so the infection can persist for decades. | Measles, chickenpox, and mumps before vaccination, which returned every year or every few years in large cities. |
+| SEIR | As SIR, plus a latent period: infected but not yet infectious. | Measles (about ten days from infection to becoming infectious), chickenpox, and COVID-19 (a few days). |
+| SEIR with vaccination at birth (Question 3) | A fraction of newborns is immune from the start. | Measles, mumps, and rubella (the MMR vaccine), and polio, all part of routine childhood vaccination. |
+| SEIAR, with an asymptomatic class (Question 7) | Some infected people never develop symptoms but can still transmit. | Polio (about 7 in 10 infections cause no symptoms), COVID-19, influenza, and cholera. |
+
+These are the textbook matches, not exact descriptions. Real diseases mix
+features: immunity to influenza fades as the virus changes, and some
+hepatitis B infections become chronic rather than ending in recovery. The
+class app includes four more models (waning immunity, disease deaths,
+isolation of cases, and chronic carriers), each with its typical diseases on
+its first tab.
+
+## Question 1. Warm-up: the models you already know
+
+The next-generation matrix is not only for models with several infected
+compartments. When there is a single infected compartment, $x=(I)$, the
+"matrices" $F$ and $V$ are $1\times 1$, that is, plain numbers, and
+$K=FV^{-1}=F/V$. Each model below is written in the notation in which you
+first met it: the first, third, and fourth in absolute numbers, the second in
+proportions.
+
+1. **Closed SIR** (Week 1): $S'=-\beta IS$, $\ I'=\beta IS-\gamma I$, $\ R'=\gamma I$, with $S(0)=S_0$.
+2. **SIR with demography** (Week 1): $S'=\mu-\beta IS-\mu S$, $\ I'=\beta IS-(\gamma+\mu)I$, $\ R'=\gamma I-\mu R$.
+3. **SIS** (Week 2): $S'=-\beta IS+\gamma I$, $\ I'=\beta IS-\gamma I$, with $S+I=N_0$.
+4. **SI** (no recovery): $S'=-\beta IS$, $\ I'=\beta IS$, with $S(0)=S_0$.
+
+**(a) Math.** For each model, state the disease-free equilibrium you are
+linearizing at, split the $I$ equation into $\mathcal{F}$ (new infections) and
+$\mathcal{V}$ (everything else), and compute $F$, $V$, and $R_0=F/V$. Show the
+work for each model, then summarize it in the table. For models 1--3, confirm
+that you recover exactly the threshold quantity from Weeks 1 and 2.
+
+### Closed SIR
+
+$$
+\begin{aligned}
+S' &= -\beta IS \\
+I' &= \beta IS - \gamma I \\
+R' &= \gamma I\\
+S(0) &= S_0
+\end{aligned}
+$$
+
+| Equation | Term | Meaning | Assigned To |
+|-----------|-----------|-----------|-----------|
+| \(I'\) | \(\beta I S\) | Rate of New Infection | \(F_1 = \beta I S\) |
+| \(I'\) | \(-\gamma I\) | Rate of Recovery | \(V_1 = \gamma I\) |
+
+$$
+\mathcal{F} =
+\begin{pmatrix}
+\beta
+\end{pmatrix}
+$$
+
+$$
+\mathcal{V} =
+\begin{pmatrix}
+\gamma
+\end{pmatrix}
+,
+\mathcal{V}^{-1}=\left(\frac{1}{\gamma}\right)
+$$
+
+$$
+K = \mathcal{F}\mathcal{V}^{-1}=\frac{\beta}{\gamma}
+$$
+
+$$
+R_0=\frac{\beta}{\gamma}
+$$
+
+---
+
+### SIR with Demography
+
+$$
+\begin{aligned}
+S' &= \mu-\beta IS-\mu S \\
+I' &= \beta IS-(\gamma+\mu)I \\
+R' &= \gamma I-\mu R\\
+S(0) &= S_0
+\end{aligned}
+$$
+
+| Equation | Term | Meaning | Assigned To |
+|-----------|-----------|-----------|-----------|
+| \(I'\) | \(\beta I S\) | Rate of New Infection | \(F_1 = \beta I S\) |
+| \(I'\) | \(-(\gamma+\mu)I\) | Rate of Recovery or Death | \(V_1 = (\gamma+\mu)I\) |
+
+$$
+\mathcal{F} =
+\begin{pmatrix}
+\beta
+\end{pmatrix}
+$$
+
+$$
+\mathcal{V} =
+\begin{pmatrix}
+\gamma+\mu
+\end{pmatrix}
+,
+\mathcal{V}^{-1}=\left(\frac{1}{\gamma+\mu}\right)
+$$
+
+$$
+K=\mathcal{F}\mathcal{V}^{-1}
+=\frac{\beta}{\gamma+\mu}
+$$
+
+$$
+R_0=\frac{\beta}{\gamma+\mu}
+$$
+
+---
+
+### SIS
+
+$$
+\begin{aligned}
+S' &= -\beta IS+\gamma I \\
+I' &= \beta IS-\gamma I \\
+S+I &= N_0
+\end{aligned}
+$$
+
+| Equation | Term | Meaning | Assigned To |
+|-----------|-----------|-----------|-----------|
+| \(I'\) | \(\beta I S\) | Rate of New Infection | \(F_1 = \beta I S\) |
+| \(I'\) | \(-\gamma I\) | Rate of Recovery | \(V_1 = \gamma I\) |
+
+$$
+\mathcal{F} =
+\begin{pmatrix}
+\beta
+\end{pmatrix}
+$$
+
+$$
+\mathcal{V} =
+\begin{pmatrix}
+\gamma
+\end{pmatrix}
+,
+\mathcal{V}^{-1}=\left(\frac{1}{\gamma}\right)
+$$
+
+$$
+K=\mathcal{F}\mathcal{V}^{-1}
+=\frac{\beta}{\gamma}
+$$
+
+$$
+R_0=\frac{\beta}{\gamma}
+$$
+
+---
+
+### SI
+
+$$
+\begin{aligned}
+S' &= -\beta IS \\
+I' &= \beta IS \\
+S(0) &= S_0
+\end{aligned}
+$$
+
+| Equation | Term | Meaning | Assigned To |
+|-----------|-----------|-----------|-----------|
+| \(I'\) | \(\beta I S\) | Rate of New Infection | \(F_1 = \beta I S\) |
+| \(I'\) | Nothing | There is no recovery | \(V_1 = 0\) |
+
+$$
+\mathcal{F} =
+\begin{pmatrix}
+\beta
+\end{pmatrix}
+$$
+
+$$
+R_0=\beta
+$$
+
+| Model | Disease-free equilibrium | \(F\) | \(V\) | \(R_0\) |
+|---------|---------|---------|---------|---------|
+| Closed SIR | (1, 0, 0) | \(\beta\) | \(\gamma\) | \(\frac{\beta}{\gamma}\) |
+| SIR with demography | (1, 0, 0) | \(\beta\) | \(\gamma+\mu\) | \(\frac{\beta}{\gamma+\mu}\) |
+| SIS | (1, 0) | \(\beta\) | \(\gamma\) | \(\frac{\beta}{\gamma}\) |
+| SI | (1, 0) | \(\beta\) | 0 | Undefined |
+
+**(b) Math.** In the SIS model, recovered hosts return to $S$; in the SIR
+models they do not. Why does that difference not show up in $R_0$?
+
+$R_0$ concerns itself with the rate at which infected enter and leave the infected category. At the disease free equilibrium, $S = S_0$. That means that it doesn't really matter if the infected return to susceptible or become immune.
+
+**(c) Math.** What goes wrong with the method for the SI model? Say what the
+failure means biologically. Then suppose infected hosts die at rate $\alpha$,
+so that $I'=\beta IS-\alpha I$, and recompute $R_0$.
+
+Because there is no recovery, `V` is zero. That means `R0` encounters division by zero.
+
+$$
+\mathcal{F} = (\beta)
+$$
+
+$$
+\mathcal{V} = (\alpha)
+$$
+
+$$
+\mathcal{V}^{-1} = \frac{1}{\alpha}
+$$
+
+$$
+K = \mathcal{F}\mathcal{V}^{-1}
+  = \frac{\beta}{\alpha}
+$$
+
+$$
+R_0 = \frac{\beta}{\alpha}
+$$
+
+**(d) Code.** Write a function `R0_from_FV(Fmat, Vmat)` that takes any two
+square matrices and returns $\rho(FV^{-1})$. Test it on the four models above
+(a $1\times 1$ matrix is `matrix(x, 1, 1)`), using $\beta=0.6$,
+$\gamma=0.2$, $\mu$ as in Part A, and $S_0=N_0=1$, and then on the SEIR
+matrices from Section 4, where it should agree with `ngm(parms)$R0`. Report
+what R does when you give it the SI model. (This chunk is set up so that an
+error message is printed in your knitted document and does not stop the
+knit.) You will reuse this function in the later questions.
+
+```{r hw1, error=TRUE}
+R0_from_FV <- function(Fmat,Vmat)
+{
+  Vinv <- solve(Vmat)
+  K <- Fmat %*% Vinv
+  evalues <- eigen(K)
+  r0 <- max(evalues$values)
+  return(r0)
+}
+
+beta <- 0.6
+gamma <- 0.2
+mu <- 1 / (70 * 365)
+sigma = 1 / 3
+
+#SIR 
+F <- matrix(c(beta), nrow = 1, ncol = 1)
+V <- matrix(c(gamma), nrow = 1, ncol = 1)
+print(R0_from_FV(F, V))
+
+#SIR Demography
+F <- matrix(c(beta), nrow = 1, ncol = 1)
+V <- matrix(c(gamma + mu), nrow = 1, ncol = 1)
+print(R0_from_FV(F, V))
+#SIS
+F <- matrix(c(beta), nrow = 1, ncol = 1)
+V <- matrix(c(gamma), nrow = 1, ncol = 1)
+print(R0_from_FV(F, V))
+#SIER
+F <- matrix(c(0, beta, 0, 0), nrow = 2, ncol = 2)
+V <- matrix(c(sigma+mu, 0, -sigma, gamma+mu), nrow = 2, ncol = 2)
+print(R0_from_FV(F, V))
+#SI
+F <- matrix(c(beta), nrow = 1, ncol = 1)
+V <- matrix(c(0), nrow = 1, ncol = 1)
+print(R0_from_FV(F, V))
+
+```
+
+The solver throws an error because V is singular.
+
+## Question 2. No demography
+
+Set $\mu=0$ (an epidemic fast enough that births and deaths are negligible
+over its course, as in Week 1's closed-population model).
+
+**(a) Math.** Redo the next-generation-matrix computation of Section 4 with
+$\mu=0$ and show that $R_0=\beta/\gamma$, the Kermack--McKendrick threshold
+from Week 1. Explain biologically why the latent period drops out of $R_0$
+entirely.
+
+**Your answer:**
+
+**(b) Math.** With $\mu=0$, show that $\dfrac{dS}{dR}=-R_0\,S$ no matter what
+$\sigma$ is. Starting from $R(0)=0$ and $S(0)=S_0$, deduce that the fraction
+$S_\infty$ still susceptible when the epidemic is over satisfies
+$$S_\infty = S_0\,e^{-R_0(1-S_\infty)} .$$
+
+**Your answer:**
+
+**(c) Code.** With $\mu=0$ and the other parameters as in Part A, simulate the
+epidemic for latent periods of 1, 5, and 15 days, long enough for each one to
+finish. Report $S_\infty$ for each. Then solve the equation in (b)
+numerically (`uniroot` will do it) and compare. In one or two sentences: what
+does the latent period change, and what can it not change?
+
+```{r hw2c}
+# your code here
+```
+
+**Your answer:**
+
+## Question 3. Measles and vaccination
+
+Measles has a latent period of about 8 days and an infectious period of about
+7 days. Take a life expectancy of 70 years and $R_0\approx 15$.
+
+**(a) Math.** Solve the $R_0$ formula for the implied transmission coefficient
+$\beta$ (per day), and compute the endemic equilibrium $(S^*,E^*,I^*)$ by hand
+from the formulas of Section 3.
+
+**Your answer:**
+
+**(b) Code.** Check (a): build the parameter vector, confirm that `ngm()`
+returns $R_0=15$, compute the equilibrium with `endemic_eq()`, and verify that
+the model's derivatives vanish there.
+
+```{r hw3b}
+# your code here
+```
+
+**(c) Math.** Now suppose a fraction $v$ of newborns is vaccinated at birth and
+is immune for life. Vaccinated newborns enter $R$ directly, so the first and
+last equations become $S'=\mu(1-v)-\beta IS-\mu S$ and
+$R'=\mu v+\gamma I-\mu R$, and the $E$ and $I$ equations are unchanged. Find the new
+disease-free equilibrium, redo the next-generation-matrix computation there,
+and show that the reproduction number under vaccination is $R_v=(1-v)R_0$.
+Conclude that the disease cannot invade when $v>1-1/R_0$. (This is the
+herd-immunity threshold. You are deriving it, not quoting it.)
+
+**Your answer:**
+
+**(d) Code.** First explain why the Jacobian matrix $J(S,E,I)$ of Section 5 is
+unchanged by vaccination, even though the equilibrium moves. Then, for the
+measles parameters and $v$ running from $0$ to $1$, compute the largest real
+part of the eigenvalues at the new disease-free equilibrium and plot it
+against $v$. Mark the value of $v$ where it crosses zero and compare it with
+$1-1/R_0$.
+
+```{r hw3d}
+# your code here
+```
+
+**Your answer:**
+
+## Question 4. Matrix bookkeeping
+
+**(a) Math.** Explain in your own words why progression from $E$ to $I$ (the
+term $\sigma E$) is counted in $\mathcal{V}$ and not in $\mathcal{F}$, even
+though it moves a host into a "more infected" compartment.
+
+**Your answer:**
+
+**(b) Code.** Make the mistake on purpose. Move $\sigma E$ into $\mathcal{F}$,
+so that
+$$\mathcal{F}_{\text{wrong}}=\begin{pmatrix}\beta IS\\ \sigma E\end{pmatrix},\qquad
+\mathcal{V}_{\text{wrong}}=\begin{pmatrix}(\sigma+\mu)E\\ (\gamma+\mu)I\end{pmatrix},$$
+build the corresponding matrices $F$ and $V$, and compute
+$\rho(FV^{-1})$ for the Part A parameters with your `R0_from_FV` function from
+Question 1. Repeat for three or four other values of $\beta$, some giving
+$R_0<1$ and some $R_0>1$, and tabulate the "wrong" value next to the correct
+$R_0$.
+
+```{r hw4b}
+# your code here
+```
+
+**(c) Math.** From your table, conjecture the relationship between the wrong
+value and the correct $R_0$, and prove it by computing the eigenvalues of the
+wrong $K$ by hand. Does the mistake change *whether* the disease can invade?
+Then explain why the number it produces is nevertheless not the basic
+reproduction number: under the wrong bookkeeping, what counts as one
+"generation"?
+
+**Your answer:**
+
+## Question 5. When the bottom row is not zero
+
+**(a) Math.** In three or four sentences, explain why the bottom row of $K$ is
+entirely zero for the SEIR model.
+
+**Your answer:**
+
+**(b) Math.** Suppose a fraction $q$ of new infections skips latency and enters
+$I$ directly:
+$$E'=(1-q)\beta IS-(\sigma+\mu)E,\qquad I'=q\,\beta IS+\sigma E-(\gamma+\mu)I .$$
+Write down $\mathcal{F}$, $\mathcal{V}$, $F$, $V$, and $K$ for this model and
+find $R_0$. Check your formula in the limits $q=0$ and $q=1$ and say which
+earlier model each limit recovers.
+
+**Your answer:**
+
+**(c) Code.** Verify (b) numerically: compute $\rho(K)$ with `eigen` for
+$q=0,\,0.25,\,0.5,\,0.75,\,1$ and compare with your formula. Use a latent
+period of 200 days and a life expectancy of 5 years here (a slowly progressing
+infection in a short-lived host), so that the effect of $q$ is large enough to
+see. Then explain why the effect is nearly invisible for the Part A
+parameters.
+
+```{r hw5c}
+# your code here
+```
+
+**Your answer:**
+
+## Question 6. Estimating $R_0$ from how fast an outbreak grows
+
+Early in an outbreak nobody can observe $R_0$. What can be observed is the
+growth rate $r$: cases double every so many days.
+
+**(a) Math.** Starting from the characteristic equation in Section 2, show that
+$$R_0=\frac{(r+\sigma+\mu)(r+\gamma+\mu)}{(\sigma+\mu)(\gamma+\mu)},$$
+which for $\mu\approx 0$ is $R_0\approx\left(1+\dfrac{r}{\sigma}\right)\left(1+\dfrac{r}{\gamma}\right)$.
+Derive the corresponding formula for the SIR model (no latent period).
+
+**Your answer:**
+
+**(b) Math.** A new outbreak is doubling every 3 days. The disease is known to
+have a latent period of 3 days and an infectious period of 5 days. Estimate
+$R_0$ twice: once assuming an SIR model and once assuming an SEIR model. Which
+estimate is larger, and why?
+
+**Your answer:**
+
+**(c) Code.** Test your SEIR estimate. Find the $\beta$ that gives your
+estimated $R_0$, simulate the epidemic, fit the early growth rate as in
+Section 2, and confirm that the doubling time is 3 days. Then simulate an SIR
+epidemic using your SIR estimate of $R_0$ and plot both $I(t)$ curves on a log
+scale. Early on they should be parallel straight lines: the same growth rate.
+Report the final value of $S$ in each. If a public-health agency used the wrong model, what would it get
+wrong?
+
+```{r hw6c}
+# your code here
+```
+
+**Your answer:**
+
+## Question 7 (optional). A model the transfer diagram cannot handle
+
+Suppose a fraction $f$ of infections is **asymptomatic**. After the latent
+period a host moves to $A$ (asymptomatic) with probability $f$ or to $I$
+(symptomatic) with probability $1-f$. Asymptomatic hosts are less infectious,
+by a factor $\kappa<1$, and recover at their own rate $\gamma_A$:
+$$
+\begin{aligned}
+S' &= \mu-\beta S(I+\kappa A)-\mu S,\\
+E' &= \beta S(I+\kappa A)-(\sigma+\mu)E,\\
+I' &= (1-f)\sigma E-(\gamma+\mu)I,\\
+A' &= f\sigma E-(\gamma_A+\mu)A,\\
+R' &= \gamma I+\gamma_A A-\mu R .
+\end{aligned}
+$$
+
+**(a) Math.** With infected compartments $x=(E,I,A)$, write down
+$\mathcal{F}$, $\mathcal{V}$, and the $3\times 3$ matrices $F$ and $V$ at the
+disease-free equilibrium.
+
+**Your answer:**
+
+**(b) Code.** Build $F$ and $V$ in R and compute $R_0=\rho(FV^{-1})$ for
+$\beta=0.6$, latent period 3 days, symptomatic infectious period 5 days,
+asymptomatic infectious period 8 days, life expectancy 70 years, $f=0.4$, and
+$\kappa=0.5$. Print $V^{-1}$ and interpret its first column in words.
+
+```{r hw7b}
+# your code here
+```
+
+**Your answer:**
+
+**(c) Math.** Find a closed-form expression for $R_0$ in this model. (The
+first column of $V^{-1}$ and the first row of $F$ are all you need; say why.)
+Interpret each factor, and check the formula against your number from (b).
+
+**Your answer:**
+
+**(d) Code.** Plot $R_0$ against $f$ from $0$ to $1$ for $\kappa=0.2$, $0.5$,
+and $1$, on one set of axes. For which values of $\kappa$ does a larger
+asymptomatic fraction *increase* $R_0$, and why is that possible when
+asymptomatic hosts are no more infectious than symptomatic ones?
+
+```{r hw7d}
+# your code here
+```
+
+**Your answer:**
