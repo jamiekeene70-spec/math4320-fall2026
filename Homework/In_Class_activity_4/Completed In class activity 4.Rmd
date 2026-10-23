@@ -1,0 +1,540 @@
+---
+title: "Week 4 In-Class Activity: Trichomoniasis in a Beef Herd"
+lang: en
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: cosmo
+    math_method: mathml
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7.5, fig.height = 4.6, dpi = 110)
+library(deSolve)
+library(ggplot2)
+theme_set(theme_minimal(base_size = 15))
+```
+
+```{css, echo=FALSE}
+body { font-size: 19px; line-height: 1.65; color: #2a2430; }
+.main-container { max-width: 980px; }
+h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; color: #2a2430; }
+h1.title { color: #4f2d7f; }
+pre, pre code { font-size: 15.5px; }
+pre { border-left: 4px solid #4f2d7f; background: #f7f4fb; }
+math { font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", math; font-size: 1.12em; }
+math[display="block"] { overflow-x: auto; overflow-y: hidden; }
+blockquote { border-left: 5px solid #4f2d7f; background: #f7f4fb; font-size: 19px; }
+```
+
+## Before you start
+
+1. Install the packages once (in the RStudio **Console**):
+   `install.packages(c("deSolve", "ggplot2", "rmarkdown"))`
+2. Run the chunks **in order**, from the top, with the green arrow on each chunk.
+3. Each experiment follows the same steps:
+   1. read the **explanation** and the **scenario**;
+   2. **predict** what will change, *before* calculating anything;
+   3. **calculate by hand** with the formulas from the Week 4 lectures;
+   4. **run the code** and say whether you were right;
+   5. **look at the figure** and explain what it shows.
+4. Write your answers after each **Your answer**. In each experiment the line
+   that creates the scenario (`p_new$... <-`) can be changed to test your own
+   ideas.
+
+The result numbers (Proposition 2.3, Theorem 5.1, ...) are the ones on the
+Week 4 page.
+
+## The problem
+
+**Bovine trichomoniasis** ("trich") is a sexually transmitted infection of
+cattle, spread only during breeding. It causes early pregnancy loss, so
+infected herds have fewer and later calves.
+
+* **Cows** usually clear the infection on their own in about 90 days, and can
+  be infected again: SIS.
+* **Bulls**, especially older ones, usually stay infected for the rest of their
+  time in the herd. They leave the infected class only when they are sold or
+  culled.
+* Infection passes from an infected bull to a cow very efficiently; bulls are
+  infected by cows much less easily.
+
+This is why Texas requires bulls to be tested, or certified as virgin, before
+they are sold for breeding (Texas Animal Health Commission).
+
+**Our herd.** A large ranch with 2,500 cows and 100 bulls, 2,600 animals. The
+rancher buys **one untested bull**, and it is infected. Time is in **years**.
+
+**The groups are the two sexes:** bulls ($b$) and cows ($c$). Bulls only infect
+cows and cows only infect bulls, so $\beta_{bb}=\beta_{cc}=0$. (We use lowercase
+$b$ and $c$ so they are not confused with the matrix $B$ of the notes.) The
+transmission numbers are chosen for this activity to be roughly consistent with
+the facts above; they are not estimates from data.
+
+The model is the two-group SIS model of Section 3 with $\beta_{bb}=\beta_{cc}=0$:
+$$
+\begin{aligned}
+I_b' &= (n_b-I_b)\,\beta_{bc}\,I_c-\gamma_bI_b,\\
+I_c' &= (n_c-I_c)\,\beta_{cb}\,I_b-\gamma_cI_c,\qquad n_c=1-n_b .
+\end{aligned}
+$$
+
+------------------------------------------------------------------------
+
+## Setup: parameters and tools
+
+```{r parameters}
+par <- list(
+  n_b = 100 / 2600,        # proportion of the herd that is bulls
+  beta_bc = 8,             # transmission TO bulls FROM cows (per year)
+  beta_cb = 12,            # transmission TO cows FROM bulls (per year)
+  gamma_b = 0.25,          # bulls leave the infected class (sold or culled): about 4 years
+  gamma_c = 4,             # cows clear the infection: about 1/4 year = 90 days
+  seed_b = 1 / 2600,       # at time 0: one infected bull (proportion of the herd)
+  seed_c = 0,
+  prot_b = 0, prot_c = 0   # fraction of bulls / cows protected (used in Experiment 4)
+)
+```
+
+These functions are the Week 4 formulas, plus two helpers that print numbers
+and draw figures. Just run the chunk.
+
+```{r tools}
+# K = F V^{-1}, with F = diag(n_b, n_c) B and V = diag(gamma_b, gamma_c).
+# Groups in the order: bulls, cows.
+make_K <- function(p) {
+  B <- matrix(c(0,         p$beta_bc,      # row 1: to bulls (from bulls, from cows)
+                p$beta_cb, 0),             # row 2: to cows  (from bulls, from cows)
+              nrow = 2, byrow = TRUE)
+  S0 <- c((1 - p$prot_b) * p$n_b, (1 - p$prot_c) * (1 - p$n_b))  # susceptibles at P0
+  F <- diag(S0) %*% B
+  V <- diag(c(p$gamma_b, p$gamma_c))
+  F %*% solve(V)
+}
+
+# Jacobian at the disease-free equilibrium: J(P0) = F - V
+make_J0 <- function(p) {
+  V <- diag(c(p$gamma_b, p$gamma_c))
+  make_K(p) %*% V - V
+}
+
+# spectral radius: the largest absolute value of the eigenvalues
+spec_rad <- function(A) max(Mod(eigen(A)$values))
+
+# simulate the model; output in proportions of the herd
+simulate <- function(p, years = 30) {
+  model <- function(t, y, p) {
+    Ib <- y[1]; Ic <- y[2]
+    Sb <- (1 - p$prot_b) * p$n_b - Ib           # susceptible bulls (protected ones excluded)
+    Sc <- (1 - p$prot_c) * (1 - p$n_b) - Ic     # susceptible cows
+    dIb <- Sb * p$beta_bc * Ic - p$gamma_b * Ib
+    dIc <- Sc * p$beta_cb * Ib - p$gamma_c * Ic
+    list(c(dIb, dIc))
+  }
+  out <- as.data.frame(ode(y = c(p$seed_b, p$seed_c), times = seq(0, years, by = 0.02),
+                           func = model, parms = p, rtol = 1e-10, atol = 1e-15))
+  names(out) <- c("time", "Ib", "Ic")
+  out
+}
+
+# the numbers we compare in every experiment
+numbers <- function(p) {
+  end <- tail(simulate(p), 1)
+  c(R0 = spec_rad(make_K(p)),
+    growth_rate_r = max(eigen(make_J0(p))$values),
+    infected_bulls_after_30y = round(2600 * end$Ib, 1),
+    infected_cows_after_30y  = round(2600 * end$Ic, 1))
+}
+
+# figure: infected animals over time, for several scenarios
+compare <- function(scenarios, years = 30, log_scale = FALSE) {
+  d <- do.call(rbind, lapply(names(scenarios), function(nm) {
+    out <- simulate(scenarios[[nm]], years)
+    data.frame(time = out$time, infected = 2600 * (out$Ib + out$Ic), scenario = nm)
+  }))
+  d$scenario <- factor(d$scenario, levels = names(scenarios))
+  g <- ggplot(subset(d, infected > 0), aes(time, infected, colour = scenario, linetype = scenario)) +
+    geom_line(linewidth = 1.1) +
+    scale_colour_manual(values = c("#000000", "#D55E00", "#0072B2", "#009E73")) +
+    labs(x = "years", y = "infected animals (herd of 2,600)", colour = NULL, linetype = NULL)
+  if (log_scale) g <- g + scale_y_log10()
+  g
+}
+```
+
+------------------------------------------------------------------------
+
+## Warm-up: the original herd
+
+> **Theory** (Section 4, Step 6; Proposition 2.3; Theorem 5.1). With
+> $\beta_{bb}=\beta_{cc}=0$,
+> $$
+> K=\begin{pmatrix}0&k_{bc}\\ k_{cb}&0\end{pmatrix},\qquad
+> k_{bc}=\frac{\beta_{bc}n_b}{\gamma_c},\quad k_{cb}=\frac{\beta_{cb}n_c}{\gamma_b},
+> $$
+> where $k_{ij}$ is the number of new infections in group $i$ caused by one
+> infected animal of group $j$. Putting $k_{bb}=k_{cc}=0$ in equation (8) gives
+> $$
+> R_0=\sqrt{k_{bc}\,k_{cb}} .
+> $$
+> The Jacobian at the disease-free equilibrium is
+> $J(P_0)=F-V=\begin{pmatrix}-\gamma_b&\beta_{bc}n_b\\ \beta_{cb}n_c&-\gamma_c\end{pmatrix}$,
+> and the growth rate $r$ is its largest eigenvalue (Section 5).
+
+**Calculate by hand:**
+
+1. $k_{bc}$ and $k_{cb}$. Why is one so much larger than the other?
+2. $R_0$. Will trich take hold in the herd?
+3. The trace and determinant of $J(P_0)$, and $r$ from
+   $r=\dfrac{\operatorname{tr}J+\sqrt{(\operatorname{tr}J)^2-4\det J}}{2}$.
+   (Since $\gamma_b\ne\gamma_c$, the shortcut $r=\gamma(R_0-1)$ does **not**
+   apply here.)
+
+**Your answer:**
+1.
+$k_{bc}=\frac{\beta_{bc} n_{b}}{\gamma_{c}} = \frac{8 * \frac{1}{26}}{4} = \frac{1}{13}$
+
+$k_{cb}=\frac{\beta_{cb} n_{c}}{\gamma_{b}} = \frac{12 * \frac{25}{26}}{\frac{1}{4}} = \frac{600}{13}$
+
+There are more susceptable cows than bulls at any given time, bulls stay infective for longer than cows do, giving them more chances to infect in general.
+Cows also get infected at a higher rate than bulls.
+
+2. 
+$R_0 = \sqrt{k_{bc} k_{cb}}{} = \sqrt{\frac{600}{13^2}} \approx 1.88$
+
+The trich will take hold in the herd.
+
+3.
+$Tr(J) = -\gamma_b -\gamma_c = -\frac{1}{4}-4 = -\frac{17}{4}$
+
+$Det(J) = (-\gamma_b)(-\gamma_c) - (\beta_{bc}n_b)(\beta_{cb}n_c) = (\frac{-1}{4})(-4)-(8*\frac{1}{26})(12 * \frac{25}{26}) = 1 - \frac{600}{169} = \frac{-431}{169}$
+
+$r=\dfrac{\operatorname{tr}J+\sqrt{(\operatorname{tr}J)^2-4\det J}}{2} = \frac{\frac{-17}{4} + \sqrt{(\frac{-17}{4})^2 -4(\frac{-431}{169}})}{2} \approx 0.533$
+
+```{r warmup}
+make_K(par)
+make_J0(par)
+numbers(par)
+```
+
+**Were you right?**
+
+**Your answer:**
+Yes, I was right.
+
+```{r warmup-fig, fig.alt="Number of infected animals in the herd over 30 years after one infected bull arrives: it grows and levels off at an endemic level."}
+compare(list(original = par))
+```
+
+**What does the figure show?** How many years until the number of infected
+animals levels off?
+
+**Your answer:**
+The figure shows the number of infected animals over time in the herd, mesured in years.
+It levels off in roughly 15-20 years.
+
+------------------------------------------------------------------------
+
+## Experiment 1. Test and cull bulls every year
+
+**Explanation.** Testing bulls every year and culling the infected ones means a
+bull stays infected in the herd for about 1 year instead of 4: $\gamma_b$ goes
+from 0.25 to 1.
+
+**Predict** (before calculating): will $R_0$ go up or down? Will trich still
+take hold?
+
+
+
+**Your answer:**
+Prediction: $R_0$ will decrease to the point that the trich will not take hold.
+
+**Calculate by hand:** the new $k_{cb}$ and the new $R_0$. Then find the
+**critical** $\gamma_b$, where $R_0=1$ (set $k_{bc}k_{cb}=1$ and solve for
+$\gamma_b$). How long can an infected bull stay in the herd before trich
+takes hold?
+
+**Your answer:**
+$k_{cb} = \frac{\beta_{cb} n_c}{\gamma_{b}} = \frac{12 \frac{25}{26}}{1} = \frac{150}{13}$
+
+$R_0 = \sqrt{\frac{150}{13^2}} \approx 0.942$
+
+$R_0 = 1 = \sqrt{k_{bc}k_{cb}}$
+$1 = k_{bc}k_{cb} -->  13 = k_{cb} = \frac{\beta_{cb}n_c}{\gamma_b}$
+$\gamma_b = \frac{\beta_{cb}n_c}{13} = \frac{12 \frac{25}{26}}{13} \approx 0.8876$
+$\frac{1}{\gamma_b} = 1.12666... years$
+
+```{r exp1}
+p_new <- par
+p_new$gamma_b <- 1                       # the scenario: change this to test other values
+rbind(original = numbers(par), cull_every_year = numbers(p_new))
+```
+
+**Were you right?**
+
+**Your answer:**
+I was.
+
+```{r exp1-fig, fig.alt="Infected animals over 30 years for the original herd and for yearly testing and culling of bulls."}
+compare(list(original = par, "cull every year" = p_new))
+```
+
+**What does the figure show? Why?**
+
+**Your answer:**
+The figure shows that if the bulls are culled yearly, the disease is unable to take hold of the herd.
+
+------------------------------------------------------------------------
+
+## Experiment 2. Same $R_0$, different speed?
+
+**Explanation.** Two ranchers each double one rate. Rancher A removes infected
+bulls twice as fast ($\gamma_b$ from 0.25 to 0.5). Rancher B treats cows so
+they clear trich twice as fast ($\gamma_c$ from 4 to 8).
+
+**Predict:** which rancher lowers $R_0$ more? Which one slows the spread more?
+
+**Your answer:**
+Prediction: They should be the same?
+
+**Calculate by hand:** $R_0$ for each rancher. (Hint: how do $\gamma_b$ and
+$\gamma_c$ enter $R_0=\sqrt{k_{bc}k_{cb}}$?) Then $r$ for each one, from the
+trace and determinant of their $J(P_0)$.
+
+**Your answer:**
+Rancher A: 
+$k_{bc} = \frac{8 *\frac{1}{26}}{4} = \frac{1}{13}$
+$k_{cb} = \frac{12 * \frac{25}{26}}{\frac{1}{2}} = \frac{300}{13}$
+
+Rancher B: 
+$k_{bc} = \frac{8 *\frac{1}{26}}{8} = \frac{1}{26}$
+$k_{cb} = \frac{12 * \frac{25}{26}}{\frac{1}{4}} = \frac{600}{13}$
+
+$R_{0A} = \sqrt{\frac{300}{13} * \frac{1}{13}} \approx 1.33$
+$R_{0B} = \sqrt{\frac{600}{13} * \frac{1}{26}} \approx 1.33$
+
+$Tr(J_{A}) = \frac{-1}{2} -4 = -4.5$
+$Det(J_A) = (\frac{-1}{2})(-4)-(8*\frac{1}{26})(12 * \frac{25}{26}) = 2-\frac{600}{169} = \frac{-262}{169}$
+$r_A = \frac{-4.5 + \sqrt{(-4.5)^2 - 4(\frac{-262}{169})}}{2} \approx 0.322 $
+
+$Tr(J_{B}) = \frac{-1}{4} -8 = -8.25$
+$Det(J_B) = (\frac{-1}{4})(-8)-(8*\frac{1}{26})(12 * \frac{25}{26}) = 2-\frac{600}{169} = \frac{-262}{169}$
+$r_B = \frac{-8.25 + \sqrt{(-8.25)^2 - 4(\frac{-262}{169})}}{2} \approx 0.184 $
+
+```{r exp2}
+p_A <- par; p_A$gamma_b <- 0.5           # rancher A: bulls
+p_B <- par; p_B$gamma_c <- 8             # rancher B: cows
+rbind(original = numbers(par), rancher_A = numbers(p_A), rancher_B = numbers(p_B))
+```
+
+**Were you right?** Why can two herds have the **same** $R_0$ but different
+growth rates $r$?
+
+**Your answer:**
+I wasn't right, because while they have the same $R_0$, reducing the infectious time for the larger population seems to be more effective in reducing infection in the herd.
+
+```{r exp2-fig, fig.alt="Infected animals over 30 years for the original herd, rancher A (bulls removed twice as fast) and rancher B (cows clear twice as fast)."}
+compare(list(original = par, "A: bulls x2" = p_A, "B: cows x2" = p_B))
+```
+
+**What does the figure show?** Compare how fast each herd reaches its final
+level, and the final levels themselves.
+
+**Your answer:**
+The figure shows that while both strategies make the herd take longer to get infected, and to resolve to a lower level, treating the cows causes significantly lower infection rates than culling bulls twice as often.
+
+------------------------------------------------------------------------
+
+## Experiment 3. What if trich arrives in a cow?
+
+**Explanation.** Instead of an infected bull, the rancher buys one infected cow.
+
+**Predict:** does $R_0$ change? Does the growth rate $r$ change? Does the start
+of the epidemic look different?
+
+**Your answer:**
+
+**Calculate by hand:** which of $k_{bc}$, $k_{cb}$, $R_0$, $\operatorname{tr}J(P_0)$
+and $\det J(P_0)$ depend on where the infection starts? Then, at $t=0$, with
+$I_b=0$ and $I_c$ equal to one cow, use the model equations: is $I_c$ going up
+or down? And $I_b$?
+
+**Your answer:**
+
+```{r exp3}
+p_new <- par
+p_new$seed_b <- 0
+p_new$seed_c <- 1 / 2600                 # the scenario: one infected cow
+rbind(original = numbers(par), starts_in_a_cow = numbers(p_new))
+```
+
+**Were you right?**
+
+**Your answer:**
+$k_{bc}$, $k_{cb}$, $R_0$, $\operatorname{tr}J(P_0)$ and $\detJ(P_0)$ do not depend on where the infection starts in the group.
+
+$$
+\begin{aligned}
+I_b' &= (n_b-I_b)\,\beta_{bc}\,I_c-\gamma_bI_b,\\
+I_c' &= (n_c-I_c)\,\beta_{cb}\,I_b-\gamma_cI_c,\qquad n_c=1-n_b .
+\end{aligned}
+$$
+
+```{r exp3-fig, fig.alt="Infected animals on a logarithmic scale for the first 10 years, starting from one infected bull or from one infected cow. The cow start first drops, then both curves grow at the same rate."}
+compare(list("starts in a bull" = par, "starts in a cow" = p_new), years = 10, log_scale = TRUE)
+```
+
+**What does the figure show?** Why does the cow start drop at first, and why do
+the two curves end up parallel? (Section 5: after the transient, every start
+grows like $e^{rt}$.)
+
+**Your answer:**
+The figure shows an initial drop, because transmission from a cow is harder than from a bull, however once a bull is infected, it is functionally no different from the original scenario with a time delay, hence why it becomes parallel with the original.
+------------------------------------------------------------------------
+
+## Experiment 4. Who should be protected?
+
+**Explanation.** A thought experiment: imagine a vaccine that protects an
+animal completely and can be given to bulls or to cows. (Real trich vaccines
+are given to cows and only reduce infection.) The rancher has **75 doses**.
+Protected animals can never be infected, so protecting fractions $p_b$ of the
+bulls and $p_c$ of the cows lowers the susceptibles at $P_0$ to $(1-p_b)n_b$ and
+$(1-p_c)n_c$, which multiplies the rows of $K$ by $1-p_b$ and $1-p_c$
+(Section 7):
+$$
+K_p=\begin{pmatrix}0&(1-p_b)\,k_{bc}\\ (1-p_c)\,k_{cb}&0\end{pmatrix}.
+$$
+
+**Predict:** where should the 75 doses go: bulls, cows, or spread at random?
+
+**Your answer:**
+Prediction: Because treating the cows was more effective in experiment two, vaccinating the cows should help.
+
+**Calculate by hand:** show that $R_p=\sqrt{(1-p_b)(1-p_c)}\;R_0$. Then compute
+$R_p$ for each plan:
+
+* **bulls only:** $p_b=75/100$, $p_c=0$;
+* **cows only:** $p_b=0$, $p_c=75/2500$;
+* **at random:** $p_b=p_c=75/2600$.
+
+**Your answer:**
+$k_{bc} = \frac{\beta_{bc}n_b(1-p_b)}{\gamma_c}$
+
+$k_{cb} = \frac{\beta_{cb}n_c(1-p_c)}{\gamma_b}$
+
+$R_p = \sqrt{k_{bc}k_{cb}} = \sqrt{\frac{\beta_{cb}n_b(1-p_b)\beta_{bc}n_c(1-p_c)}{\gamma_c\gamma_b}} = \sqrt{(1-p_b)(1-p_c)}\sqrt{\frac{\beta_{cb}n_b\beta_{bc}n_c}{\gamma_c\gamma_b}} = \sqrt{(1-p_b)(1-p_c)}R_0$
+
+Bulls only: $p_b = \frac{75}{100}$  $p_c = 0$
+$R_p = \sqrt{(\frac{25}{100})(1)} R_0 = \frac{R_0}{2} \approx 0.94$
+
+Cows only: $p_b = 0$  $p_c = \frac{75}{2500}$
+$R_p = \sqrt{(\frac{2425}{2500})(1)} R_0 \approx R_0*0.98489 \approx 1.856$
+
+Random: $p_b = \frac{75}{2600}$ $p_c = \frac{75}{2600}$
+$R_p = \sqrt{(\frac{2425}{2600})(\frac{2425}{2600})} R_0 \approx 1.8299$
+
+```{r exp4}
+protect <- function(p, pb, pc) { q <- p; q$prot_b <- pb; q$prot_c <- pc; q }
+p_bulls  <- protect(par, pb = 75 / 100, pc = 0)
+p_cows   <- protect(par, pb = 0,        pc = 75 / 2500)
+p_random <- protect(par, pb = 75 / 2600, pc = 75 / 2600)
+rbind(original = numbers(par), bulls_only = numbers(p_bulls),
+      cows_only = numbers(p_cows), at_random = numbers(p_random))
+```
+
+**Were you right?** Why does the same number of doses have such different
+effects?
+
+**Your answer:**
+The disease can only be transmitted by cows to bulls and from bulls to cows, so vaccinating 3/4ths the bull population stalls out the number of susceptable transmissions. 
+
+```{r exp4-fig, fig.alt="Infected animals over 30 years for the original herd and for three ways of protecting 75 animals: all in bulls, all in cows, or at random."}
+compare(list(original = par, "bulls only" = p_bulls,
+             "cows only" = p_cows, "at random" = p_random))
+```
+
+**What does the figure show?** How many doses would be needed if they all went
+to cows? (Hint: set $R_p=1$ with $p_b=0$.)
+
+**Your answer:**
+The figure shows the similarity of levels with only cows vaccinated and random vaccinations, and how the disease doesn't take hold in the herd with only bulls vaccinated.
+
+$R_p = 1 \sqrt{(1)(1-p_c)}$
+$1-\frac{1}{R_0^2} = p_c = 1-\frac{13^2}{600} = \frac{431}{600} --> \: 1796 \; Doses$
+
+------------------------------------------------------------------------
+
+## Experiment 5. Artificial insemination
+
+**Explanation.** Breeding a fraction $a$ of the cows by artificial insemination
+(AI) removes those matings, so both $\beta_{bc}$ and $\beta_{cb}$ are multiplied by
+$1-a$.
+
+**Predict:** if 30% of the cows are bred by AI, does trich disappear? And with
+50%?
+
+**Your answer:**
+Prediction: 30% will not be enought, but 50% will be.
+
+**Calculate by hand:** show that $R_0$ is multiplied by $1-a$. Compute $R_0$ for
+$a=0.3$ and $a=0.5$, and the smallest $a$ that stops trich.
+
+**Your answer:**
+$R_{0a} = \sqrt{\frac{\beta_{bc}(1-a)n_b\beta_{cb}(1-a)n_c}{\gamma_c\gamma_b}} = \sqrt{(1-a)^2} \sqrt{\frac{\beta_{bc}n_b\beta_{cb}n_c}{\gamma_b \gamma_c}} = (1-a) R_0}$
+
+a=0.3
+$R_0a = (1-0.3)R_0 \approx 1.319 $
+
+a=0.5
+$R_0a = (1-0.5)R_0 \approx 0.942 $
+
+```{r exp5}
+ai <- function(p, a) { q <- p; q$beta_bc <- (1 - a) * p$beta_bc; q$beta_cb <- (1 - a) * p$beta_cb; q }
+p_30 <- ai(par, 0.3)
+p_50 <- ai(par, 0.5)
+rbind(original = numbers(par), AI_30 = numbers(p_30), AI_50 = numbers(p_50))
+```
+
+**Were you right?**
+
+**Your answer:**
+I was correct!
+
+```{r exp5-fig, fig.alt="Infected animals over 30 years for the original herd and with 30 percent or 50 percent of cows bred by artificial insemination."}
+compare(list(original = par, "AI 30%" = p_30, "AI 50%" = p_50))
+```
+
+**What does the figure show?** With 30% AI, trich still persists. Is that
+outcome still useful to the rancher? Why?
+
+**Your answer:**
+Even if the disease persists, the stable level of infection in the herd is significantly lower than the original.
+
+------------------------------------------------------------------------
+
+## Wrap-up
+
+In two or three sentences each:
+
+1. Neither bulls alone nor cows alone could keep trich going. How can the two
+   together have $R_0>1$?
+2. Which experiment surprised you most? What had you predicted, and what
+   happened instead?
+3. If you were advising this rancher, which measure would you recommend first,
+   and why?
+
+**Your answer:**
+1. the disease can only transfer between the two groups. 
+
+2. Experiment 2, with the same R_0 not meaning the same growth r.
+
+3. Vaccinating the bulls in the herd, because it seems to be the least disruptive to the ranch's schedule, and completely eliminates the trich.
+
+------------------------------------------------------------------------
+
+**Sources for the facts about trich:** Mississippi State University Extension,
+*Trichomoniasis in Beef Cattle*; MSD Veterinary Manual, *Trichomoniasis in
+Cattle*; Texas Animal Health Commission, *Texas Trichomoniasis Program*.
